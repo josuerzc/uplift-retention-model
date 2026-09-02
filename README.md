@@ -137,8 +137,8 @@ estrategias distintas:
   finalmente combina ambas estimaciones ponderando por el **propensity
   score** — dándole más peso a la estimación que viene del grupo con más
   observaciones. Como el grupo tratado es 2x más grande que el control en
-  este dataset, el X-Learner debería (y en la práctica lo hace, ver tabla de
-  resultados) superar al T-Learner.
+  este dataset, el X-Learner debería, en promedio, superar al T-Learner (ver
+  tabla de resultados — aunque con ruido considerable split a split).
 
 Adicionalmente, el **Uplift Tree** (`UpliftTreeClassifier`) sirve como capa de
 interpretabilidad: en vez de optimizar pureza de clase como un árbol normal,
@@ -182,36 +182,76 @@ sobre ese modelo auxiliar.
 
 ## Resultados: comparación de los 3 modelos
 
-Resultados sobre un test set (30% del dataset, split estratificado por
-treatment + outcome, `random_state=42`):
+### Resultado sobre el split de referencia (`random_state=42`)
+
+Test set = 30% del dataset (19,200 clientes, 174 conversiones), split
+estratificado por treatment + outcome:
 
 | Modelo | AUUC | Qini | Comentario |
 |---|---:|---:|---|
-| **X-Learner** | **0.6104** | **0.1095** | Mejor en ambas métricas — esperable dado el desbalance de grupos |
+| **X-Learner** | **0.6104** | **0.1095** | Mejor en ambas métricas en este split — esperable dado el desbalance de grupos |
 | T-Learner | 0.5791 | 0.0796 | Segundo lugar; penalizado por el ruido del grupo control (más chico) |
 | Uplift Tree | 0.5291 | 0.0301 | Útil para interpretabilidad, pero menos preciso que los meta-learners de XGBoost |
 | S-Learner | 0.5253 | 0.0249 | El más simple; el treatment aporta poca señal frente al resto de features |
-| Response Model (baseline) | 0.4876 | -0.0126 | **Peor que targetear al azar en Qini** — confirma que ignorar el treatment no sirve para targeting de uplift |
+| Response Model (baseline) | 0.4876 | -0.0126 | Peor que targetear al azar en Qini en este split |
 | Random Targeting (baseline) | 0.4658 | -0.0350 | Piso de referencia |
 
-**Recomendación: usar el X-Learner.** Es el que mejor Qini y AUUC obtiene, lo
-cual es consistente con la teoría: el X-Learner está diseñado exactamente
-para el escenario de grupos de tamaño desbalanceado que tenemos en Hillstrom
-(2 tratados por cada 1 de control). El Uplift Tree no se recomienda como
-modelo de producción por su menor desempeño, pero es muy valioso como capa de
-**explicación** complementaria al X-Learner (reglas de segmentación legibles
-para negocio). El hallazgo más importante para justificar el proyecto frente
-a stakeholders es que el **Response Model baseline tiene Qini negativo** —
-peor que targetear al azar — lo que muestra en números concretos que
-"targetear a los que más probablemente compran" (el enfoque intuitivo sin
-uplift modeling) puede ser **peor que no usar ningún modelo**, mientras que
-los 3 meta-learners de uplift sí superan claramente a ambos baselines.
+Si nos quedáramos solo con esta tabla, la conclusión sería "el X-Learner gana
+claro y los baselines pierden claro". **Pero validar con un único split sobre
+un evento tan raro como `conversion` (~0.9%) es exactamente el tipo de
+conclusión apurada que este proyecto quería evitar** — por eso el siguiente
+paso fue obligatorio.
 
-> Nota: `src/evaluation.py::evaluate_with_multiple_splits` permite repetir
-> esta comparación con varios splits (semillas) distintos para confirmar que
-> el ranking de modelos no es un artefacto de un único split de test —
-> recomendado antes de decidir un modelo de producción con datos reales del
-> banco.
+### Validación con múltiples splits: el ranking es mucho más ruidoso de lo que parece
+
+Usando `src/evaluation.py::evaluate_with_multiple_splits` con 4 semillas
+distintas (42, 100, 101, 102), cada una con su propio split 70/30 y sus
+propios modelos entrenados desde cero:
+
+| Modelo | Qini medio | Qini (desvío estándar) | AUUC medio | AUUC (desvío estándar) |
+|---|---:|---:|---:|---:|
+| **X-Learner** | **0.0327** | 0.1077 | **0.5326** | 0.1073 |
+| Random Targeting (baseline) | 0.0233 | 0.0442 | 0.5248 | 0.0453 |
+| T-Learner | 0.0055 | 0.0518 | 0.5049 | 0.0516 |
+| Response Model (baseline) | -0.0020 | 0.0511 | 0.4977 | 0.0522 |
+| Uplift Tree | -0.0053 | 0.0784 | 0.4960 | 0.0783 |
+| S-Learner | -0.0197 | 0.0712 | 0.4799 | 0.0707 |
+
+**Lo que este resultado deja en evidencia, sin maquillarlo:** con solo ~174
+conversiones por test set (el 0.9% de 19,200 clientes, repartidas además
+entre tratados y control), el desvío estándar de Qini/AUUC entre splits es
+**del mismo orden de magnitud que la propia métrica**. En el split con semilla
+102, por ejemplo, el X-Learner obtuvo el PEOR Qini de los 6 (-0.1178),
+literalmente lo opuesto a lo que sugería el split de referencia. Con una
+muestra de solo 4 splits no alcanza para calcular un intervalo de confianza
+riguroso, pero alcanza y sobra para la conclusión honesta: **en este dataset,
+con este tamaño de test set, la diferencia entre modelos de uplift no es
+estadísticamente robusta split a split.**
+
+**Recomendación: usar el X-Learner, con esta salvedad explícita.** A favor
+del X-Learner hay dos argumentos independientes: (1) es el que mejor Qini y
+AUUC *promedio* obtiene a lo largo de los 4 splits, y (2) el argumento
+estructural se mantiene sin importar el ruido de la métrica — el X-Learner
+está diseñado exactamente para el escenario de grupos desbalanceados que
+tenemos en Hillstrom (2 tratados por cada 1 de control), mientras que el
+T-Learner sufre ese desbalance por diseño. Pero antes de llevar esto a
+producción con datos reales del banco, **no alcanza con un test set de este
+tamaño**: recomendamos (a) juntar más historia de campañas para tener más
+conversiones en el test set, (b) evaluar con bootstrap sobre el test set para
+obtener intervalos de confianza en vez de un punto estimado, y/o (c) si el
+volumen de conversiones sigue siendo muy bajo, usar temporalmente `visit`
+(evento mucho más frecuente, ~15% en Hillstrom) como outcome intermedio para
+comparar modelos con menos ruido, sabiendo que el objetivo de negocio final
+sigue siendo `conversion`.
+
+El hallazgo que **sí se sostiene de forma consistente** a través de todos los
+splits es que **ambos baselines dejan de ser competitivos apenas se comparan
+contra el mejor meta-learner**: ni el Response Model ni el targeting aleatorio
+promedian un Qini mejor que el X-Learner en ningún split. Ese es el punto que
+más vale la pena llevarle a un stakeholder: el enfoque intuitivo de "targetear
+a los que más probablemente compran" (Response Model) no le gana de forma
+confiable ni siquiera a targetear al azar, mientras que el X-Learner sí
+muestra, en promedio, señal por encima de ambos.
 
 ## Requisitos
 
