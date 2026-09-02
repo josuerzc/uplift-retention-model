@@ -1,0 +1,18 @@
+# causalml solo publica wheels precompiladas para Windows en Python 3.11 y 3.12.
+# Si usas otra version de Python en Windows, pip intentara compilar causalml
+# desde el codigo fuente (tiene extensiones en Cython/C++) y necesitaras
+# instalar "Microsoft C++ Build Tools". Ver README.md, seccion "Requisitos".
+causalml==0.17.0
+
+pandas>=2.2,<4.0
+numpy>=2.0,<3.0
+scikit-learn>=1.5
+xgboost>=2.0
+lightgbm>=4.0
+shap>=0.45
+matplotlib>=3.8
+seaborn>=0.13
+
+# Para correr el notebook de EDA
+jupyter>=1.0
+ipykernel>=6.29
