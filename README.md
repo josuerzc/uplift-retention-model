@@ -78,8 +78,10 @@ datos propios del banco.
 
 ```
 uplift-retention-model/
-├── data/raw/hillstrom.csv     → dataset original (descargado de minethatdata.com)
-├── notebooks/01_eda.ipynb     → exploración de datos
+├── data/raw/hillstrom.csv               → dataset original (descargado de minethatdata.com)
+├── notebooks/
+│   ├── 01_eda.ipynb                     → exploración de datos
+│   └── 02_modelado_evaluacion.ipynb     → entrena los 4 modelos, evalúa, grafica Qini/gain y corre SHAP
 ├── src/
 │   ├── preprocessing.py       → carga, limpieza y split estratificado
 │   ├── models.py              → S-Learner, T-Learner y X-Learner con XGBoost + Uplift Tree
@@ -112,6 +114,14 @@ uplift-retention-model/
 - **`src/interpretation.py`**: aplica SHAP al modelo ganador (X-Learner) para
   explicar qué variables mueven el **uplift estimado** — no la probabilidad
   de conversión directa. Ver la sección "SHAP" más abajo para la diferencia.
+
+- **`notebooks/02_modelado_evaluacion.ipynb`**: no duplica lógica, solo
+  importa las funciones de `src/` para correr todo el análisis de forma
+  interactiva — entrenar los 4 modelos, la tabla comparativa de AUUC/Qini,
+  las curvas de Qini y de ganancia acumulada, la validación multi-split, las
+  reglas del Uplift Tree y el gráfico de SHAP. Es la forma más rápida de
+  reproducir y auditar cada número que aparece en la sección de Resultados
+  de este README sin tener que correr 4 scripts sueltos.
 
 ## Los 3 meta-learners
 
@@ -204,33 +214,39 @@ paso fue obligatorio.
 
 ### Validación con múltiples splits: el ranking es mucho más ruidoso de lo que parece
 
-Usando `src/evaluation.py::evaluate_with_multiple_splits` con 4 semillas
-distintas (42, 100, 101, 102), cada una con su propio split 70/30 y sus
-propios modelos entrenados desde cero:
+Usando `src/evaluation.py::evaluate_with_multiple_splits`, cada split usa su
+propio 70/30 y sus propios modelos entrenados desde cero. Primero lo
+corrimos con solo 4 semillas y el "ganador" cambiaba por completo según qué
+4 semillas tocaran (en una tanda, Random Targeting terminó primero en Qini
+promedio). Esa inestabilidad es en sí misma el hallazgo más importante de
+esta sección, así que subimos a **10 semillas** para tener una media más
+confiable:
 
 | Modelo | Qini medio | Qini (desvío estándar) | AUUC medio | AUUC (desvío estándar) |
 |---|---:|---:|---:|---:|
-| **X-Learner** | **0.0327** | 0.1077 | **0.5326** | 0.1073 |
-| Random Targeting (baseline) | 0.0233 | 0.0442 | 0.5248 | 0.0453 |
-| T-Learner | 0.0055 | 0.0518 | 0.5049 | 0.0516 |
-| Response Model (baseline) | -0.0020 | 0.0511 | 0.4977 | 0.0522 |
-| Uplift Tree | -0.0053 | 0.0784 | 0.4960 | 0.0783 |
-| S-Learner | -0.0197 | 0.0712 | 0.4799 | 0.0707 |
+| **X-Learner** | **0.0442** | 0.0873 | **0.5436** | 0.0867 |
+| Uplift Tree | 0.0417 | 0.1016 | 0.5416 | 0.1008 |
+| T-Learner | 0.0258 | 0.0751 | 0.5246 | 0.0735 |
+| Random Targeting (baseline) | 0.0195 | 0.0807 | 0.5200 | 0.0801 |
+| Response Model (baseline) | 0.0147 | 0.0725 | 0.5144 | 0.0719 |
+| S-Learner | -0.0044 | 0.0719 | 0.4944 | 0.0713 |
 
 **Lo que este resultado deja en evidencia, sin maquillarlo:** con solo ~174
 conversiones por test set (el 0.9% de 19,200 clientes, repartidas además
-entre tratados y control), el desvío estándar de Qini/AUUC entre splits es
-**del mismo orden de magnitud que la propia métrica**. En el split con semilla
-102, por ejemplo, el X-Learner obtuvo el PEOR Qini de los 6 (-0.1178),
-literalmente lo opuesto a lo que sugería el split de referencia. Con una
-muestra de solo 4 splits no alcanza para calcular un intervalo de confianza
-riguroso, pero alcanza y sobra para la conclusión honesta: **en este dataset,
-con este tamaño de test set, la diferencia entre modelos de uplift no es
-estadísticamente robusta split a split.**
+entre tratados y control), el desvío estándar de Qini/AUUC entre splits
+(~0.07-0.10) sigue siendo grande en relación a la media (~0.04 para el
+X-Learner) — un split individual puede darte casi cualquier ranking, y de
+hecho con solo 4 splits llegamos a ver a un baseline encabezar la tabla.
+Promediando 10 splits el resultado ya es más estable: el X-Learner encabeza
+tanto AUUC como Qini en promedio, el Uplift Tree lo sigue de cerca, y el
+S-Learner queda último con Qini promedio directamente negativo (peor que
+ambos baselines). Aun así, **10 splits siguen sin ser suficientes para un
+intervalo de confianza riguroso** — es una muestra chica para estimar una
+métrica con este desvío estándar.
 
 **Recomendación: usar el X-Learner, con esta salvedad explícita.** A favor
 del X-Learner hay dos argumentos independientes: (1) es el que mejor Qini y
-AUUC *promedio* obtiene a lo largo de los 4 splits, y (2) el argumento
+AUUC *promedio* obtiene a lo largo de los 10 splits, y (2) el argumento
 estructural se mantiene sin importar el ruido de la métrica — el X-Learner
 está diseñado exactamente para el escenario de grupos desbalanceados que
 tenemos en Hillstrom (2 tratados por cada 1 de control), mientras que el
@@ -244,11 +260,11 @@ volumen de conversiones sigue siendo muy bajo, usar temporalmente `visit`
 comparar modelos con menos ruido, sabiendo que el objetivo de negocio final
 sigue siendo `conversion`.
 
-El hallazgo que **sí se sostiene de forma consistente** a través de todos los
-splits es que **ambos baselines dejan de ser competitivos apenas se comparan
-contra el mejor meta-learner**: ni el Response Model ni el targeting aleatorio
-promedian un Qini mejor que el X-Learner en ningún split. Ese es el punto que
-más vale la pena llevarle a un stakeholder: el enfoque intuitivo de "targetear
+El hallazgo que **sí se sostiene al promediar 10 splits** es que **ambos
+baselines quedan por debajo del mejor meta-learner**: ni el Response Model
+(0.0147) ni el targeting aleatorio (0.0195) alcanzan el Qini promedio del
+X-Learner (0.0442). Ese es el punto que más vale la pena llevarle a un
+stakeholder: el enfoque intuitivo de "targetear
 a los que más probablemente compran" (Response Model) no le gana de forma
 confiable ni siquiera a targetear al azar, mientras que el X-Learner sí
 muestra, en promedio, señal por encima de ambos.
@@ -290,6 +306,11 @@ python src/evaluation.py
 
 # 7. Interpretar el modelo ganador con SHAP
 python src/interpretation.py
+
+# 8. (Opcional pero recomendado) Ver todo lo anterior de forma interactiva,
+#    con las curvas de Qini/gain, la validación multi-split y el gráfico de
+#    SHAP embebidos en un solo notebook:
+jupyter notebook notebooks/02_modelado_evaluacion.ipynb
 ```
 
 Todos los comandos de `src/` deben ejecutarse **desde la raíz del proyecto**
